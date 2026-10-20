@@ -40,14 +40,12 @@ input,select{padding:9px;border:1px solid var(--bd);border-radius:8px;background
 <div class="card">
   <b>0) الإعدادات</b>
   <div class="row">
-    <input id="key" type="password" placeholder="Anthropic API key (sk-ant-...)" style="flex:1;min-width:220px">
-    <select id="model">
-      <option value="claude-sonnet-5-5">Sonnet 5.5 (أدق)</option>
-      <option value="claude-haiku-5-5">Haiku 5.5 (أرخص وأسرع)</option>
-    </select>
+    <select id="prov"><option value="gemini">Google Gemini (مجاني)</option><option value="claude">Claude (مدفوع)</option></select>
+    <input id="key" type="password" placeholder="API key" style="flex:1;min-width:200px">
+    <input id="model" placeholder="اسم الموديل" style="width:190px" dir="ltr">
     <button id="saveKey">حفظ</button>
   </div>
-  <div class="mut">المفتاح بيتحفظ في متصفحك بس. كل صورة بتتبعت لـ Anthropic عشان تتحلل، والاستخدام بيتحاسب على حسابك. جرّب الأول على 20 صورة تشوف التكلفة والدقة.</div>
+  <div class="mut">Gemini المجاني: المفتاح من aistudio.google.com/apikey والموديل المقترح <b dir="ltr">gemini-3.5-flash-lite</b>. لو طلع خطأ 404 غيّر الاسم لـ <b dir="ltr">gemini-flash-latest</b>. المفتاح بيتحفظ في متصفحك، والصور بتتبعت للمزوّد عشان تتحلل. الخطة المجانية فيها حد يومي، فالأداة بتكمل من حيث وقفت.</div>
 </div>
 
 <div class="card">
@@ -107,14 +105,21 @@ async function prep(file){
   const t=document.createElement('canvas'),k2=240/Math.max(c.width,c.height);t.width=c.width*k2;t.height=c.height*k2;t.getContext('2d').drawImage(c,0,0,t.width,t.height);
   return{b64:c.toDataURL('image/jpeg',.85).split(',')[1],thumb:t.toDataURL('image/jpeg',.75)};
 }
+let lastCall=0;
 async function analyze(b64){
-  for(let t=0;t<4;t++){
-    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':localStorage.sm_key||'','anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:localStorage.sm_model||'claude-sonnet-5-5',max_tokens:700,messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},{type:'text',text:PROMPT}]}]})});
-    if(r.status==429||r.status>=500){await sleep(2500*(t+1));continue}
-    if(!r.ok){const e=new Error((await r.text()).slice(0,200));e.fatal=r.status==401||r.status==400||r.status==403||r.status==404;throw e}
-    const j=await r.json(),m=j.content.map(c=>c.text||'').join('').match(/\{[\s\S]*\}/);
-    return JSON.parse(m[0]);
+  const gem=(localStorage.sm_prov||'gemini')=='gemini';
+  for(let t=0;t<5;t++){
+    if(gem){const w=6500-(Date.now()-lastCall);if(w>0)await sleep(w);lastCall=Date.now()}
+    const model=localStorage.sm_model||(gem?'gemini-3.5-flash-lite':'claude-sonnet-5-5');
+    const r=gem?await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(localStorage.sm_key||'')}`,{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({contents:[{parts:[{text:PROMPT},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json',temperature:0}})})
+      :await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':localStorage.sm_key||'','anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body:JSON.stringify({model,max_tokens:700,messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},{type:'text',text:PROMPT}]}]})});
+    if(r.status==429||r.status>=500){await sleep(8000*(t+1));if(t==4&&r.status==429){const e=new Error('الحصة خلصت (الحد اليومي أو في الدقيقة). كمّل بكرة أو بعد شوية بنفس الصور.');e.fatal=true;throw e}continue}
+    if(!r.ok){const e=new Error((await r.text()).slice(0,250));e.fatal=[400,401,403,404].includes(r.status);throw e}
+    const j=await r.json();
+    const tx=gem?(j.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join(''):j.content.map(c=>c.text||'').join('');
+    const m=tx.match(/\{[\s\S]*\}/);return JSON.parse(m[0]);
   }
   throw new Error('فشل بعد محاولات');
 }
@@ -133,7 +138,7 @@ async function addCatalog(files){
       done++;prog(done/todo.length);st(`تحليل الكتالوج: ${done} من ${todo.length}`);cnt();
     }
   }
-  await Promise.all([worker(),worker(),worker()]);
+  await Promise.all((localStorage.sm_prov||'gemini')=='gemini'?[worker()]:[worker(),worker(),worker()]);
   st(stop?'اتوقف بسبب خطأ':'تم ✅');cnt();
 }
 const cnt=()=>$('cnt').textContent=`— متحلل ومحفوظ: ${catalog.length} صورة`;
@@ -175,8 +180,8 @@ async function runQueries(files){
 }
 
 // ---------- wiring ----------
-$('key').value=localStorage.sm_key||'';$('model').value=localStorage.sm_model||'claude-sonnet-5-5';
-$('saveKey').onclick=()=>{localStorage.sm_key=$('key').value.trim();localStorage.sm_model=$('model').value;st('اتحفظت الإعدادات ✅')};
+$('key').value=localStorage.sm_key||'';$('prov').value=localStorage.sm_prov||'gemini';$('model').value=localStorage.sm_model||'';
+$('saveKey').onclick=()=>{localStorage.sm_key=$('key').value.trim();localStorage.sm_model=$('model').value.trim();localStorage.sm_prov=$('prov').value;st('اتحفظت الإعدادات ✅')};
 $('big').onclick=()=>$('big').style.display='none';
 $('catIn').onchange=e=>addCatalog(e.target.files);
 $('qIn').onchange=e=>runQueries(e.target.files);
