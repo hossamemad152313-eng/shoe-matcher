@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>مطابقة موديلات الأحذية</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--tx:#1b1b1b;--mut:#6b6b6b;--ac:#0b6b4f;--bd:#ddd}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--card:#222;--tx:#eee;--mut:#9a9a9a;--ac:#3fc79a;--bd:#3a3a3a}}
+*{box-sizing:border-box}
+body{margin:0;font-family:Tahoma,Arial,sans-serif;background:var(--bg);color:var(--tx);padding:16px;max-width:1000px;margin-inline:auto}
+h1{font-size:20px;margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:14px}
+button,label.btn{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:15px;cursor:pointer;display:inline-block;font-family:inherit}
+button.sec{background:transparent;color:var(--tx);border:1px solid var(--bd)}
+input[type=file]{display:none}
+.mut{color:var(--mut);font-size:13px;margin-top:8px}
+.bar{height:8px;background:var(--bd);border-radius:4px;overflow:hidden;margin-top:10px}
+.bar>div{height:100%;width:0;background:var(--ac);transition:width .2s}
+#drop{border:2px dashed var(--bd);border-radius:12px;padding:28px;text-align:center;color:var(--mut)}
+#drop.on{border-color:var(--ac)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.q{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+.q img.src{width:150px;border-radius:8px;border:1px solid var(--bd)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;flex:1;min-width:260px}
+.it{border:1px solid var(--bd);border-radius:8px;overflow:hidden;background:var(--bg);cursor:pointer}
+.it img{width:100%;display:block;aspect-ratio:1/1;object-fit:cover}
+.it div{padding:4px 6px;font-size:13px;display:flex;justify-content:space-between}
+.sc{font-weight:bold;color:var(--ac)}
+#big{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:9}
+#big img{max-width:94vw;max-height:94vh;border-radius:8px}
+</style>
+</head>
+<body>
+<h1>👟 مطابقة موديلات الأحذية</h1>
+
+<div class="card">
+  <b>1) الكتالوج بتاعك</b> <span id="cnt" class="mut"></span>
+  <div class="row" style="margin-top:10px">
+    <label class="btn">اختار صور الكتالوج (كلها مرة واحدة)<input id="catIn" type="file" accept="image/*" multiple></label>
+    <button class="sec" id="clr">مسح الكتالوج المحفوظ</button>
+  </div>
+  <div class="bar"><div id="pg"></div></div>
+  <div class="mut" id="st">جاري تحميل نموذج الذكاء الاصطناعي (أول مرة بس، حوالي 25 ميجا)...</div>
+  <div class="mut">الكتالوج بيتحلل مرة واحدة وبيتحفظ في المتصفح. لو ضفت صور جديدة بعدين، الجديد بس هو اللي بيتحلل.</div>
+</div>
+
+<div class="card">
+  <b>2) الصورة اللي جاتلك</b>
+  <div id="drop">اسحب الصورة هنا، أو الصقها (Ctrl+V)، أو
+    <label class="btn" style="margin-inline:6px">اختار صورة<input id="qIn" type="file" accept="image/*" multiple></label>
+  </div>
+</div>
+
+<div id="res"></div>
+<div id="big"><img id="bigimg"></div>
+
+<script type="module">
+import {pipeline, RawImage} from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2';
+
+const $=id=>document.getElementById(id);
+const st=t=>$('st').textContent=t, prog=p=>$('pg').style.width=(p*100)+'%';
+let ext=null, catalog=[];
+
+// ---------- IndexedDB ----------
+const dbp=new Promise((ok,no)=>{const r=indexedDB.open('shoe-matcher',1);
+  r.onupgradeneeded=()=>r.result.createObjectStore('c',{keyPath:'key'});
+  r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});
+async function dbAll(){const d=await dbp;return new Promise(ok=>{const q=d.transaction('c').objectStore('c').getAll();q.onsuccess=()=>ok(q.result)})}
+async function dbPut(o){const d=await dbp;return new Promise(ok=>{const t=d.transaction('c','readwrite');t.objectStore('c').put(o);t.oncomplete=ok})}
+async function dbClear(){const d=await dbp;return new Promise(ok=>{const t=d.transaction('c','readwrite');t.objectStore('c').clear();t.oncomplete=ok})}
+
+// ---------- model ----------
+async function loadModel(){
+  const cb=p=>{if(p.status==='progress')st('تحميل النموذج... '+Math.round(p.progress)+'%')};
+  try{ext=await pipeline('image-feature-extraction','Xenova/dinov2-small',{device:navigator.gpu?'webgpu':'wasm',progress_callback:cb})}
+  catch(e){ext=await pipeline('image-feature-extraction','Xenova/dinov2-small',{device:'wasm',progress_callback:cb})}
+  st('النموذج جاهز ✅');
+}
+
+// ---------- image helpers ----------
+function sq(bmp,sx,sy,sw,sh){
+  const S=224,c=document.createElement('canvas');c.width=c.height=S;
+  const x=c.getContext('2d',{willReadFrequently:true});
+  x.fillStyle='#fff';x.fillRect(0,0,S,S);
+  const k=Math.min(S/sw,S/sh),w=sw*k,h=sh*k;
+  x.drawImage(bmp,sx,sy,sw,sh,(S-w)/2,(S-h)/2,w,h);
+  const d=x.getImageData(0,0,S,S),p=d.data;           // رمادي عشان اللون ميأثرش
+  for(let i=0;i<p.length;i+=4){const g=.299*p[i]+.587*p[i+1]+.114*p[i+2];p[i]=p[i+1]=p[i+2]=g}
+  x.putImageData(d,0,0);return c;
+}
+function crops(bmp){
+  const W=bmp.width,H=bmp.height,r=[sq(bmp,0,0,W,H)];
+  if(H/W>1.1){const b=H/3;                              // صورة فيها كذا فردة فوق بعض
+    for(let i=0;i<3;i++){const y=Math.max(0,i*b-b*.1),h=Math.min(H-y,b*1.2);r.push(sq(bmp,0,y,W,h))}}
+  return r;
+}
+const norm=v=>{let s=0;for(const a of v)s+=a*a;s=Math.sqrt(s)||1;return v.map(a=>a/s)};
+async function embed(canvas){
+  const o=await ext(RawImage.fromCanvas(canvas));
+  const dims=o.dims,D=dims[dims.length-1],N=dims.length>2?dims[dims.length-2]:1,d=o.data;
+  const cls=Array.from(d.slice(0,D)),mean=new Array(D).fill(0);
+  for(let n=1;n<N;n++)for(let j=0;j<D;j++)mean[j]+=d[n*D+j]/(Math.max(N-1,1));
+  return Float32Array.from(norm([...norm(cls),...norm(mean)]));
+}
+async function embedAll(bmp){const out=[];for(const c of crops(bmp))out.push(await embed(c));return out}
+function thumb(bmp){const c=document.createElement('canvas'),k=240/Math.max(bmp.width,bmp.height);
+  c.width=bmp.width*k;c.height=bmp.height*k;c.getContext('2d').drawImage(bmp,0,0,c.width,c.height);return c.toDataURL('image/jpeg',.75)}
+const dot=(a,b)=>{let s=0;for(let i=0;i<a.length;i++)s+=a[i]*b[i];return s};
+
+// ---------- catalog ----------
+async function addCatalog(files){
+  const have=new Set(catalog.map(c=>c.key));
+  const todo=[...files].filter(f=>!have.has(f.name+'|'+f.size+'|'+f.lastModified));
+  let i=0;
+  for(const f of todo){
+    const key=f.name+'|'+f.size+'|'+f.lastModified;
+    try{const bmp=await createImageBitmap(f);
+      const rec={key,name:f.name,thumb:thumb(bmp),embs:await embedAll(bmp)};
+      await dbPut(rec);catalog.push(rec)}catch(e){console.warn(f.name,e)}
+    i++;prog(i/todo.length);st(`تحليل الكتالوج: ${i} من ${todo.length}`);
+    if(i%5==0)await new Promise(r=>setTimeout(r));
+  }
+  st('تم ✅ الكتالوج جاهز'+(todo.length?'':' (مفيش صور جديدة)'));cnt();
+}
+const cnt=()=>$('cnt').textContent=`— محفوظ: ${catalog.length} صورة`;
+
+// ---------- search ----------
+async function search(file){
+  const bmp=await createImageBitmap(file);
+  const qe=await embedAll(bmp);
+  const scored=catalog.map(c=>{let m=-1;for(const a of qe)for(const b of c.embs){const s=dot(a,b);if(s>m)m=s}return{c,s:m}})
+    .sort((a,b)=>b.s-a.s).slice(0,12);
+  const url=URL.createObjectURL(file);
+  const el=document.createElement('div');el.className='card q';
+  el.innerHTML=`<div><div class="mut">الصورة اللي جاتلك</div><img class="src" src="${url}"></div>
+  <div class="grid">${scored.map(x=>`<div class="it"><img src="${x.c.thumb}"><div><span>${Math.round(x.s*100)}%</span><span class="sc"></span></div></div>`).join('')}</div>`;
+  el.querySelectorAll('.it').forEach((n,i)=>n.onclick=()=>{$('bigimg').src=scored[i].c.thumb;$('big').style.display='flex'});
+  el.querySelector('img.src').onclick=()=>{$('bigimg').src=url;$('big').style.display='flex'};
+  $('res').prepend(el);
+}
+async function runQueries(files){
+  if(!catalog.length){alert('حمّل صور الكتالوج الأول');return}
+  if(!ext){alert('استنى النموذج يخلص تحميل');return}
+  st('بدور...');for(const f of files)await search(f);st('تم ✅');
+}
+
+// ---------- wiring ----------
+$('big').onclick=()=>$('big').style.display='none';
+$('catIn').onchange=e=>addCatalog(e.target.files);
+$('qIn').onchange=e=>runQueries(e.target.files);
+$('clr').onclick=async()=>{if(confirm('مسح الكتالوج المحفوظ؟')){await dbClear();catalog=[];cnt();prog(0)}};
+const dz=$('drop');
+dz.ondragover=e=>{e.preventDefault();dz.classList.add('on')};
+dz.ondragleave=()=>dz.classList.remove('on');
+dz.ondrop=e=>{e.preventDefault();dz.classList.remove('on');runQueries([...e.dataTransfer.files].filter(f=>f.type.startsWith('image/')))};
+addEventListener('paste',e=>{const fs=[...e.clipboardData.files].filter(f=>f.type.startsWith('image/'));if(fs.length)runQueries(fs)});
+
+catalog=await dbAll();cnt();
+await loadModel();
+</script>
+</body>
+</html>
